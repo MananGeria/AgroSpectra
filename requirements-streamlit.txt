@@ -1,0 +1,17 @@
+# Streamlit Cloud Deployment Configuration
+# This file tells Streamlit Cloud which packages to install
+
+# Core dependencies for Streamlit deployment
+streamlit==1.15.0
+pandas==2.0.3
+numpy==1.24.3
+plotly==5.11.0
+folium==0.12.1
+streamlit-folium==0.15.0
+
+# Lightweight versions for cloud deployment
+# (GDAL and heavy geospatial libraries may need system-level installation)
+# For full functionality, use local deployment with Docker
+
+# If deploying to Streamlit Cloud, some features may be limited
+# Recommend using Docker deployment for full geospatial capabilities

@@ -1,0 +1,91 @@
+version: '3.8'
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agrospectra_web
+    ports:
+      - "8501:8501"
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./config:/app/config
+    environment:
+      - ENVIRONMENT=production
+      - SENTINEL_HUB_CLIENT_ID=${SENTINEL_HUB_CLIENT_ID}
+      - SENTINEL_HUB_CLIENT_SECRET=${SENTINEL_HUB_CLIENT_SECRET}
+      - SENTINEL_HUB_INSTANCE_ID=${SENTINEL_HUB_INSTANCE_ID}
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - agrospectra_network
+    command: streamlit run src/dashboard/app.py --server.port=8501 --server.address=0.0.0.0
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agrospectra_api
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./config:/app/config
+    environment:
+      - ENVIRONMENT=production
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - agrospectra_network
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+
+  redis:
+    image: redis:6.2-alpine
+    container_name: agrospectra_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - agrospectra_network
+    command: redis-server --appendonly yes
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agrospectra_worker
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./config:/app/config
+    environment:
+      - ENVIRONMENT=production
+      - REDIS_HOST=redis
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - agrospectra_network
+    command: celery -A src.workers.celery_app worker --loglevel=info
+
+networks:
+  agrospectra_network:
+    driver: bridge
+
+volumes:
+  redis_data:
+    driver: local

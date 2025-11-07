@@ -1,0 +1,24 @@
+[server]
+# Change the port (default is 8501)
+port = 8501
+
+# Enable CORS for better security
+enableCORS = false
+enableXsrfProtection = false
+
+# Server address
+headless = false
+
+[browser]
+# Automatically open browser
+gatherUsageStats = false
+serverAddress = "localhost"
+serverPort = 8501
+
+[theme]
+# App theme
+primaryColor = "#2E7D32"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
+font = "sans serif"

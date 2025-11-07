@@ -1,0 +1,444 @@
+# Sentinel Hub Configuration
+sentinel_hub:
+  client_id: "${SENTINEL_HUB_CLIENT_ID}"
+  client_secret: "${SENTINEL_HUB_CLIENT_SECRET}"
+  instance_id: "${SENTINEL_HUB_INSTANCE_ID}"
+  base_url: "https://services.sentinel-hub.com"
+  max_cloud_cover: 20
+  bands:
+    - B03 # Green - 560 nm
+    - B04 # Red - 665 nm
+    - B08 # NIR - 842 nm
+  resolution: 10 # meters
+
+# OpenWeatherMap Configuration
+openweathermap:
+  api_key: "${OPENWEATHER_API_KEY}"
+  base_url: "https://api.openweathermap.org/data/2.5"
+  units: "metric"
+  parameters:
+    - temperature
+    - humidity
+    - rainfall
+    - wind_speed
+    - cloud_cover
+
+# MOSDAC Configuration
+mosdac:
+  username: "${MOSDAC_USERNAME}"
+  password: "${MOSDAC_PASSWORD}"
+  base_url: "https://www.mosdac.gov.in"
+  products:
+    - land_surface_temperature
+    - rainfall_estimates
+    - cloud_fraction
+  download_path: "data/cache/raw/mosdac"
+
+# Soil Database Configuration
+soil_databases:
+  icar:
+    enabled: true
+    data_path: "data/external/soil/icar"
+    attributes:
+      - nitrogen
+      - phosphorus
+      - potassium
+  nbss_lup:
+    enabled: true
+    data_path: "data/external/soil/nbss_lup"
+    attributes:
+      - texture
+      - ph
+      - organic_carbon
+  bhuvan:
+    enabled: true
+    wms_url: "https://bhuvan.nrsc.gov.in/geoserver/wms"
+    layers:
+      - soil_fertility
+      - land_use
+
+# Database Configuration
+database:
+  sqlite:
+    path: "data/storage/agrospectra.db"
+    tables:
+      - satellite_data
+      - weather_data
+      - soil_data
+      - predictions
+      - user_feedback
+      - model_versions
+  geopackage:
+    path: "data/storage/agrospectra.gpkg"
+    layers:
+      - field_boundaries
+      - weather_stations
+      - soil_polygons
+      - ndvi_rasters
+      - health_classification
+      - pest_risk
+
+# Cache Configuration
+cache:
+  raw_data:
+    path: "data/cache/raw"
+    expiry_days: 30
+    max_size_gb: 50
+  processed_data:
+    path: "data/cache/processed"
+    expiry_days: 7
+    max_size_gb: 20
+  redis:
+    enabled: false
+    host: "localhost"
+    port: 6379
+    db: 0
+    ttl_seconds: 3600
+
+# Storage Paths
+storage:
+  reports: "data/reports"
+  training_data: "data/training"
+  models: "models/trained"
+  model_registry: "models/registry"
+  logs: "logs"
+  temp: "temp"
+
+# Geospatial Configuration
+geospatial:
+  default_crs: "EPSG:4326" # WGS84
+  processing_crs: "EPSG:32643" # UTM Zone 43N (for India)
+  raster_alignment:
+    target_resolution: 10 # meters
+    resampling_method: "bilinear"
+    categorical_resampling: "nearest"
+  cloud_masking:
+    enabled: true
+    cloud_threshold: 20 # percentage
+    shadow_masking: true
+
+# Vegetation Indices Configuration
+vegetation_indices:
+  ndvi:
+    enabled: true
+    formula: "(B08 - B04) / (B08 + B04)"
+    range: [-1, 1]
+    healthy_threshold: 0.6
+  ndwi:
+    enabled: true
+    formula: "(B03 - B08) / (B03 + B08)"
+    range: [-1, 1]
+  evi:
+    enabled: true
+    formula: "2.5 * ((B08 - B04) / (B08 + 6*B04 - 7.5*B03 + 1))"
+    range: [-1, 1]
+
+# Feature Engineering Configuration
+feature_engineering:
+  temporal:
+    interpolation_method: "linear"
+    sequence_length: 14 # days for LSTM
+    rolling_window: 30 # days for baseline
+  anomaly_detection:
+    ndvi_threshold: 0.2
+    method: "rolling_baseline"
+  composite_features:
+    soil_moisture_proxy:
+      enabled: true
+      components:
+        - ndwi
+        - rainfall_7day
+    temperature_stress_index:
+      enabled: true
+      components:
+        - lst
+        - ndvi_inverse
+  normalization:
+    method: "minmax"
+    range: [0, 1]
+    per_feature: true
+
+# Model Configuration
+models:
+  crop_health_cnn:
+    architecture: "MobileNetV2"
+    pretrained: "imagenet"
+    input_shape: [128, 128, 3]
+    classes:
+      - healthy
+      - stressed
+      - diseased
+    training:
+      epochs: 50
+      batch_size: 32
+      learning_rate: 0.001
+      optimizer: "adam"
+      loss: "categorical_crossentropy"
+      metrics:
+        - accuracy
+        - precision
+        - recall
+    augmentation:
+      enabled: true
+      rotation_range: 30
+      horizontal_flip: true
+      vertical_flip: true
+      brightness_range: [0.8, 1.2]
+
+  pest_risk_lstm:
+    architecture: "LSTM"
+    layers:
+      - units: 64
+        return_sequences: true
+        dropout: 0.3
+      - units: 64
+        return_sequences: false
+        dropout: 0.3
+      - units: 1
+        activation: "sigmoid"
+    input_features:
+      - ndvi
+      - temperature
+      - humidity
+      - rainfall
+      - lst
+    sequence_length: 14
+    training:
+      epochs: 100
+      batch_size: 64
+      learning_rate: 0.001
+      optimizer: "adam"
+      loss: "binary_crossentropy"
+      metrics:
+        - accuracy
+        - auc
+
+  fusion_engine:
+    weights:
+      cnn_healthy: 0.6
+      lstm_pest: 0.4
+    crop_health_score_formula: "0.6 * P_CNN(Healthy) + 0.4 * (1 - P_LSTM(Pest))"
+    thresholds:
+      excellent: 0.8
+      good: 0.6
+      fair: 0.4
+      poor: 0.2
+
+# Alert Configuration
+alerts:
+  rules:
+    high_pest_risk:
+      threshold: 0.75
+      severity: "high"
+      notification: true
+      message: "High pest outbreak risk detected. Monitor crops and prepare interventions."
+    crop_stress:
+      ndvi_drop: 0.2
+      baseline_window: 30
+      severity: "medium"
+      notification: true
+      message: "Crop stress detected. Check irrigation and nutrient levels."
+    low_vegetation:
+      ndvi_threshold: 0.3
+      severity: "low"
+      notification: true
+      message: "Low vegetation detected. Investigate potential issues."
+
+  notification:
+    email:
+      enabled: false
+      smtp_host: "smtp.gmail.com"
+      smtp_port: 587
+      from_address: "noreply@agrospectra.com"
+      use_tls: true
+    sms:
+      enabled: false
+      provider: "twilio"
+    dashboard:
+      enabled: true
+      toast_duration: 5000 # milliseconds
+
+# Report Configuration
+reports:
+  pdf:
+    template: "standard"
+    sections:
+      - cover_page
+      - summary_statistics
+      - ndvi_map
+      - pest_risk_map
+      - time_series_charts
+      - recommendations
+      - alert_history
+    fonts:
+      title: "Helvetica-Bold"
+      body: "Helvetica"
+      monospace: "Courier"
+    page_size: "A4"
+    orientation: "portrait"
+    dpi: 300
+
+  output_path: "data/reports"
+  filename_template: "AgroSpectra_Report_{farm_id}_{date}.pdf"
+
+# Dashboard Configuration
+dashboard:
+  title: "AgroSpectra - Agricultural Monitoring Platform"
+  port: 8501
+  theme: "light"
+  layout:
+    sidebar_state: "expanded"
+    wide_mode: true
+
+  map:
+    default_zoom: 15
+    min_zoom: 10
+    max_zoom: 20
+    basemap: "OpenStreetMap"
+    layers:
+      - name: "NDVI"
+        colormap: "RdYlGn"
+        opacity: 0.7
+      - name: "Pest Risk"
+        colormap: "OrRd"
+        opacity: 0.6
+      - name: "Field Boundaries"
+        color: "blue"
+        weight: 2
+
+  charts:
+    default_height: 400
+    interactive: true
+    export_enabled: true
+
+  input_controls:
+    gps_detection: true
+    manual_coordinates: true
+    shapefile_upload: true
+    date_range_picker: true
+    crop_type_selector: true
+
+# Feedback and Retraining Configuration
+feedback:
+  collection:
+    enabled: true
+    fields:
+      - prediction_id
+      - actual_class
+      - confidence_rating
+      - notes
+    storage: "database"
+
+  retraining:
+    enabled: true
+    schedule: "monthly"
+    min_samples: 100
+    validation_split: 0.2
+    metrics:
+      - accuracy
+      - f1_score
+      - per_class_precision
+      - per_class_recall
+
+    model_registry:
+      path: "models/registry/model_versions.json"
+      fields:
+        - version
+        - training_date
+        - training_samples
+        - validation_accuracy
+        - f1_score
+        - model_path
+
+      selection_criteria:
+        primary_metric: "f1_score"
+        minimum_improvement: 0.02
+        rollback_enabled: true
+
+# API Configuration
+api:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8000
+  reload: true
+  workers: 4
+  cors:
+    enabled: true
+    origins:
+      - "http://localhost:8501"
+      - "http://localhost:3000"
+
+  rate_limiting:
+    enabled: false
+    requests_per_minute: 60
+
+  authentication:
+    enabled: false
+    jwt_secret: "${SECRET_KEY}"
+    jwt_algorithm: "HS256"
+    access_token_expire_minutes: 60
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+  file:
+    enabled: true
+    path: "logs/agrospectra.log"
+    rotation: "10 MB"
+    retention: "30 days"
+    compression: "zip"
+  console:
+    enabled: true
+    colorize: true
+
+# Performance Configuration
+performance:
+  parallel_processing:
+    enabled: true
+    max_workers: 4
+
+  batch_processing:
+    enabled: true
+    batch_size: 10
+    timeout_seconds: 300
+
+  caching_strategy:
+    satellite_imagery: 30 # days
+    weather_data: 1 # days
+    processed_features: 7 # days
+    model_predictions: 1 # days
+
+# Development Configuration
+development:
+  debug: true
+  auto_reload: true
+  sample_data:
+    enabled: true
+    location: "data/sample"
+
+  testing:
+    enabled: true
+    coverage_threshold: 80
+    test_data_path: "tests/data"
+
+# Production Configuration
+production:
+  debug: false
+  auto_reload: false
+  backup:
+    enabled: true
+    schedule: "daily"
+    retention_days: 30
+    path: "backups"
+
+  monitoring:
+    enabled: false
+    sentry_dsn: "${SENTRY_DSN}"
+
+  security:
+    https_only: true
+    secret_key: "${SECRET_KEY}"
+    allowed_hosts:
+      - "localhost"
+      - "127.0.0.1"
