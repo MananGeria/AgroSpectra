@@ -18,6 +18,7 @@ import sys
 import os
 from streamlit_js_eval import get_geolocation
 from dotenv import load_dotenv
+from loguru import logger
 
 # Load environment variables
 load_dotenv()
@@ -26,6 +27,8 @@ load_dotenv()
 sys.path.append(str(Path(__file__).parent.parent))
 
 from tier2_acquisition.fetch_controller import FetchController, MetaLogger
+from tier2_acquisition import aqi_fetcher  # NEW: Separate AQI module
+from tier2_acquisition.market_price_fetcher import get_market_price  # NEW: Dynamic pricing
 from tier3_harmonization.harmonization import HarmonizationPipeline
 # Temporarily commented out to avoid Keras/TF version conflicts
 # from tier5_models.crop_health_cnn import CropHealthCNN
@@ -170,6 +173,45 @@ def render_sidebar():
     # Section 1: Area of Interest
     st.sidebar.header("1️⃣ Define Area of Interest")
     
+    # Add location search option FIRST
+    st.sidebar.markdown("### 🔍 Search by Location Name")
+    location_search = st.sidebar.text_input(
+        "Search for a place:",
+        placeholder="e.g., Punjab India, Iowa USA, São Paulo Brazil",
+        help="Enter city, state, or region name",
+        key="location_search_input"
+    )
+    
+    if st.sidebar.button("🔍 Search Location", key="search_location_btn"):
+        if location_search:
+            with st.spinner("Searching location..."):
+                try:
+                    from geopy.geocoders import Nominatim
+                    geolocator = Nominatim(user_agent="agrospectra")
+                    location = geolocator.geocode(location_search)
+                    
+                    if location:
+                        # Create a small bounding box around the location (approx 10km x 10km)
+                        lat, lon = location.latitude, location.longitude
+                        offset = 0.05  # Approximately 5-10 km depending on latitude
+                        
+                        st.session_state.aoi_coords = {
+                            'center': [lat, lon],
+                            'bbox': [lon - offset, lat - offset, lon + offset, lat + offset],
+                            'type': 'search',
+                            'address': location.address
+                        }
+                        st.sidebar.success(f"✅ Found: {location.address}")
+                        st.sidebar.info(f"📍 {lat:.4f}°N, {lon:.4f}°E")
+                    else:
+                        st.sidebar.error("❌ Location not found. Try a different search term.")
+                except Exception as e:
+                    st.sidebar.error(f"❌ Search failed: {str(e)}")
+        else:
+            st.sidebar.warning("⚠️ Please enter a location name")
+    
+    st.sidebar.markdown("---")
+    
     # Check if user has drawn a polygon using the map button
     if 'drawn_polygon' in st.session_state and st.session_state.drawn_polygon:
         st.sidebar.success("✅ Area selected on map!")
@@ -191,7 +233,11 @@ def render_sidebar():
         # Store in session state
         st.session_state.aoi_method = aoi_method
         
-        aoi_coords = None
+        # Check if AOI was set via search or manual coordinates
+        if 'aoi_coords' in st.session_state:
+            aoi_coords = st.session_state.aoi_coords
+        else:
+            aoi_coords = None
         
         if aoi_method == "Manual Coordinates":
             st.sidebar.markdown("**Enter bounding box coordinates:**")
@@ -204,27 +250,98 @@ def render_sidebar():
                 max_lon = st.number_input("Max Longitude", value=77.7, format="%.6f", key="max_lon")
             
             if st.sidebar.button("✅ Set AOI", key="set_manual_aoi"):
-                aoi_coords = {
+                st.session_state.aoi_coords = {
                     'center': [(min_lat + max_lat) / 2, (min_lon + max_lon) / 2],
                     'bbox': [min_lon, min_lat, max_lon, max_lat],
                     'type': 'bbox'
                 }
                 st.sidebar.success("✅ AOI set successfully!")
+                # Update aoi_coords from session state
+                aoi_coords = st.session_state.aoi_coords
         
         else:  # Upload Shapefile
-            uploaded_file = st.sidebar.file_uploader(
-                "Upload Shapefile (.shp)",
-                type=['shp'],
-                help="Upload a shapefile defining your field boundaries"
+            st.sidebar.info("📦 Upload all shapefile components (.shp, .shx, .dbf, .prj)")
+            uploaded_files = st.sidebar.file_uploader(
+                "Upload Shapefile Components",
+                type=['shp', 'shx', 'dbf', 'prj', 'cpg'],
+                accept_multiple_files=True,
+                help="Upload all shapefile components (minimum: .shp, .shx, .dbf)"
             )
             
-            if uploaded_file:
-                st.sidebar.success("✅ Shapefile uploaded")
-                # Placeholder - actual shapefile processing would go here
-                aoi_coords = {
-                    'center': [28.5, 77.6],
-                    'bbox': [77.5, 28.4, 77.7, 28.6]
-                }
+            if uploaded_files and len(uploaded_files) >= 3:
+                try:
+                    import geopandas as gpd
+                    import tempfile
+                    import os
+                    from pathlib import Path
+                    
+                    # Create temporary directory to store shapefile components
+                    temp_dir = tempfile.mkdtemp()
+                    
+                    # Save all uploaded files to temp directory
+                    shp_path = None
+                    for uploaded_file in uploaded_files:
+                        file_path = Path(temp_dir) / uploaded_file.name
+                        with open(file_path, 'wb') as f:
+                            f.write(uploaded_file.getbuffer())
+                        
+                        if uploaded_file.name.endswith('.shp'):
+                            shp_path = str(file_path)
+                    
+                    if shp_path:
+                        # Read shapefile
+                        gdf = gpd.read_file(shp_path)
+                        
+                        # Reproject to WGS84 (EPSG:4326) if needed
+                        if gdf.crs and gdf.crs.to_string() != 'EPSG:4326':
+                            gdf = gdf.to_crs('EPSG:4326')
+                        
+                        # Get the first geometry
+                        geom = gdf.geometry.iloc[0]
+                        
+                        # Get bounds
+                        bounds = geom.bounds  # (minx, miny, maxx, maxy)
+                        center_lat = (bounds[1] + bounds[3]) / 2
+                        center_lon = (bounds[0] + bounds[2]) / 2
+                        
+                        # Calculate area
+                        area_degrees = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
+                        area_km2 = area_degrees * 111 * 111 * np.cos(np.radians(center_lat))
+                        
+                        # Extract coordinates based on geometry type
+                        if geom.geom_type == 'Polygon':
+                            coords = list(geom.exterior.coords)
+                        elif geom.geom_type == 'MultiPolygon':
+                            # Use the largest polygon
+                            largest = max(geom.geoms, key=lambda p: p.area)
+                            coords = list(largest.exterior.coords)
+                        else:
+                            st.sidebar.error("❌ Only Polygon/MultiPolygon geometries supported")
+                            coords = None
+                        
+                        if coords:
+                            st.session_state.aoi_coords = {
+                                'center': [center_lat, center_lon],
+                                'bbox': [bounds[0], bounds[1], bounds[2], bounds[3]],
+                                'coordinates': coords,
+                                'type': 'polygon',
+                                'area_km2': area_km2
+                            }
+                            aoi_coords = st.session_state.aoi_coords
+                            
+                            st.sidebar.success(f"✅ Shapefile loaded: {len(coords)} vertices")
+                            st.sidebar.info(f"📐 Area: ~{area_km2:.2f} km²")
+                    
+                    # Cleanup temp directory
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    
+                except Exception as e:
+                    st.sidebar.error(f"❌ Error processing shapefile: {str(e)}")
+                    st.sidebar.info("💡 Make sure to upload .shp, .shx, and .dbf files")
+            
+            elif uploaded_files and len(uploaded_files) < 3:
+                st.sidebar.warning("⚠️ Please upload at least .shp, .shx, and .dbf files")
     
     st.sidebar.markdown("---")
     
@@ -320,14 +437,43 @@ def create_map(aoi_coords, results=None, enable_draw=False):
     
     # Add AOI rectangle if defined
     if bbox:
-        folium.Rectangle(
-            bounds=[[bbox[1], bbox[0]], [bbox[3], bbox[2]]],
-            color='blue',
-            fill=True,
-            fillOpacity=0.1,
-            weight=2,
-            popup="Area of Interest"
-        ).add_to(m)
+        # Check if we have polygon coordinates stored
+        if results and results.get('aoi_coords') and results['aoi_coords'].get('type') == 'polygon':
+            # Draw the actual polygon shape
+            polygon_coords = results['aoi_coords'].get('coordinates', [])
+            if polygon_coords:
+                # Convert to lat/lon pairs for folium
+                folium_coords = [[lat, lon] for lon, lat in polygon_coords]
+                folium.Polygon(
+                    locations=folium_coords,
+                    color='green',
+                    fill=True,
+                    fillColor='green',
+                    fillOpacity=0.2,
+                    weight=3,
+                    popup=f"Analysis Area (Polygon - {results['aoi_coords'].get('vertices', 0)} vertices)"
+                ).add_to(m)
+                
+                # Also show the bounding box in light blue
+                folium.Rectangle(
+                    bounds=[[bbox[1], bbox[0]], [bbox[3], bbox[2]]],
+                    color='blue',
+                    fill=False,
+                    fillOpacity=0.05,
+                    weight=1,
+                    dashArray='5, 5',
+                    popup="Bounding Box (used for API calls)"
+                ).add_to(m)
+        else:
+            # Draw rectangle for non-polygon shapes
+            folium.Rectangle(
+                bounds=[[bbox[1], bbox[0]], [bbox[3], bbox[2]]],
+                color='blue',
+                fill=True,
+                fillOpacity=0.1,
+                weight=2,
+                popup="Area of Interest"
+            ).add_to(m)
     
     # Add circle for GPS-based selection
     if aoi_coords and aoi_coords.get('type') == 'circle':
@@ -969,12 +1115,39 @@ def render_yield_prediction(yield_data):
     economic = yield_data.get('economic_estimate', {})
     if economic:
         st.markdown("### 💰 Economic Estimate")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric(
+                "Gross Value",
+                f"₹{economic.get('estimated_gross_value', 0):,.0f}",
+                help="Total estimated revenue from harvest"
+            )
+        
+        with col2:
+            st.metric(
+                "Market Price",
+                f"₹{economic.get('price_per_kg', 0):.2f}/kg",
+                help=f"Current {economic.get('market', 'market')} price"
+            )
+        
+        with col3:
+            st.metric(
+                "Total Yield",
+                f"{economic.get('total_yield_kg', 0)/1000:.2f} tons",
+                help="Predicted harvest quantity"
+            )
+        
+        # Price details
         st.info(f"""
-        **Estimated Gross Value:** ₹{economic.get('estimated_gross_value', 0):,.2f}
-        
-        **Price per kg:** ₹{economic.get('price_per_kg', 0)}
-        
-        *{economic.get('note', 'Based on average market prices')}*
+        **📊 Price Details:**
+        - **Price Range:** {economic.get('price_range', 'N/A')}
+        - **Market:** {economic.get('market', 'Regional Market')}
+        - **Source:** {economic.get('price_source', 'Market Average')}
+        - **Seasonal Factor:** {economic.get('seasonal_factor', 'N/A')}
+        - **Regional Factor:** {economic.get('regional_factor', 'N/A')}
+        - **Last Updated:** {economic.get('last_updated', 'N/A')}
         """)
 
 
@@ -1035,6 +1208,185 @@ def render_nutrient_analysis(nutrient_data):
         st.markdown("### 📋 Management Recommendations")
         for rec in recommendations:
             st.write(rec)
+
+
+def render_air_quality(aqi_data):
+    """Render air quality analysis and crop impact"""
+    if not aqi_data:
+        return
+    
+    st.markdown("## 🌫️ Air Quality Analysis")
+    
+    aqi_index = aqi_data.get('aqi', 1)
+    aqi_level = aqi_data.get('aqi_level', 'Unknown')
+    pollutants = aqi_data.get('pollutants', {})
+    crop_impact = aqi_data.get('crop_impact', {})
+    
+    # AQI level with color coding
+    aqi_colors = {
+        'Good': '🟢',
+        'Fair': '🟡',
+        'Moderate': '🟠',
+        'Poor': '🔴',
+        'Very Poor': '🟣'
+    }
+    
+    emoji = aqi_colors.get(aqi_level, '⚪')
+    
+    st.markdown(f"### {emoji} Air Quality Index: **{aqi_level}** (Level {aqi_index}/5)")
+    
+    # Pollutants grid
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("PM2.5", f"{pollutants.get('pm2_5', 0):.1f} μg/m³", 
+                 help="Fine particles that can penetrate deep into lungs and affect plants")
+        st.metric("PM10", f"{pollutants.get('pm10', 0):.1f} μg/m³",
+                 help="Coarse particles that deposit on leaf surfaces")
+    
+    with col2:
+        st.metric("Ozone (O₃)", f"{pollutants.get('o3', 0):.1f} μg/m³",
+                 help="Ground-level ozone damages plant tissues")
+        st.metric("NO₂", f"{pollutants.get('no2', 0):.1f} μg/m³",
+                 help="Nitrogen dioxide, acid rain precursor")
+    
+    with col3:
+        st.metric("SO₂", f"{pollutants.get('so2', 0):.1f} μg/m³",
+                 help="Sulfur dioxide, acid rain precursor")
+        st.metric("CO", f"{pollutants.get('co', 0):.1f} μg/m³",
+                 help="Carbon monoxide")
+    
+    # Crop impact assessment
+    st.markdown("### 🌾 Impact on Crops")
+    
+    severity = crop_impact.get('severity', 'low')
+    impacts = crop_impact.get('impacts', [])
+    recommendations = crop_impact.get('recommendations', [])
+    
+    if severity == 'high':
+        st.error("🔴 **HIGH IMPACT** - Air quality may significantly affect crop health")
+    elif severity == 'moderate':
+        st.warning("⚠️ **MODERATE IMPACT** - Monitor crops for stress symptoms")
+    else:
+        st.success("✅ **LOW IMPACT** - Air quality supports healthy crop growth")
+    
+    # Specific impacts
+    if impacts:
+        st.markdown("**Observed Effects:**")
+        for impact in impacts:
+            st.write(f"- {impact}")
+    
+    # Recommendations
+    if recommendations:
+        st.markdown("**Recommendations:**")
+        for rec in recommendations:
+            st.write(f"- {rec}")
+    
+    # Additional info
+    if aqi_data.get('source'):
+        st.caption(f"Data source: {aqi_data['source']}")
+
+
+def render_icar_enhancements(icar_data, location_info):
+    """Render ICAR-specific enhancements (India only)"""
+    if not icar_data or not location_info:
+        return
+    
+    if not location_info.get('is_india'):
+        return
+    
+    st.markdown("---")
+    st.markdown("## 🇮🇳 ICAR Enhanced Insights")
+    
+    state = location_info.get('state', 'Unknown')
+    district = location_info.get('district', 'Unknown')
+    
+    st.info(f"""
+    **Enhanced Data Active for India!**
+    
+    📍 Location: {district}, {state}
+    
+    Data Source: Indian Council of Agricultural Research (ICAR)
+    """)
+    
+    # Pest Alerts
+    pest_alerts = icar_data.get('pest_alerts', [])
+    if pest_alerts:
+        with st.expander("🐛 ICAR Pest Alerts", expanded=True):
+            st.markdown("**Regional Pest Warnings**")
+            for alert in pest_alerts:
+                st.warning(f"""
+                **{alert['pest_name']}** - Severity: {alert['severity']}
+                
+                - **Reported:** {alert['reported_date']}
+                - **Crop:** {alert['crop']}
+                - **Confidence:** {alert['confidence']:.0%}
+                
+                **Recommendation:** {alert['recommendation']}
+                """)
+    
+    # Crop Recommendations
+    recommendations = icar_data.get('recommendations', {})
+    if recommendations:
+        with st.expander("🌾 ICAR Crop Recommendations", expanded=True):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Recommended Varieties:**")
+                for variety in recommendations.get('recommended_varieties', []):
+                    st.write(f"- {variety}")
+                
+                st.markdown(f"**Sowing Window:** {recommendations.get('sowing_window', 'N/A')}")
+                st.markdown(f"**NPK Ratio:** {recommendations.get('npk_ratio', 'N/A')}")
+            
+            with col2:
+                st.markdown(f"**Estimated Yield:** {recommendations.get('estimated_yield', 'N/A')}")
+                st.markdown(f"**Market Price (MSP):** {recommendations.get('market_price', 'N/A')}")
+                st.markdown(f"**Irrigation:** {recommendations.get('irrigation_schedule', 'N/A')}")
+            
+            st.info(f"**Last Updated:** {recommendations.get('last_updated', 'N/A')}")
+    
+    # Soil Health Data
+    soil_health = icar_data.get('soil_health', {})
+    if soil_health:
+        with st.expander("🧪 ICAR Soil Health Card Data"):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("pH", soil_health.get('ph', 'N/A'))
+                st.metric("Organic Carbon", soil_health.get('organic_carbon', 'N/A'))
+                st.metric("Nitrogen", soil_health.get('nitrogen', 'N/A'))
+            
+            with col2:
+                st.metric("Phosphorus", soil_health.get('phosphorus', 'N/A'))
+                st.metric("Potassium", soil_health.get('potassium', 'N/A'))
+                st.metric("Sulphur", soil_health.get('sulphur', 'N/A'))
+            
+            with col3:
+                st.metric("Zinc", soil_health.get('zinc', 'N/A'))
+                st.metric("Boron", soil_health.get('boron', 'N/A'))
+                st.metric("Iron", soil_health.get('iron', 'N/A'))
+            
+            st.info(f"**Soil Texture:** {soil_health.get('texture', 'N/A')}")
+            st.caption(f"Data source: {soil_health.get('source', 'ICAR')} | {soil_health.get('note', '')}")
+    
+    # Weather Advisory
+    weather_advisory = icar_data.get('weather_advisory', {})
+    if weather_advisory:
+        with st.expander("⛅ IMD-ICAR Weather Advisory"):
+            st.markdown(f"**Advisory Date:** {weather_advisory.get('advisory_date', 'N/A')}")
+            st.markdown(f"**Weather Outlook:** {weather_advisory.get('weather_outlook', 'N/A')}")
+            st.markdown(f"**Temperature Range:** {weather_advisory.get('temperature_range', 'N/A')}")
+            
+            st.markdown("**Recommendations:**")
+            for rec in weather_advisory.get('recommendations', []):
+                st.write(f"- {rec}")
+            
+            warnings = weather_advisory.get('warnings', [])
+            if warnings:
+                st.markdown("**⚠️ Warnings:**")
+                for warning in warnings:
+                    st.warning(warning)
 
 
 def run_analysis(config):
@@ -1099,6 +1451,24 @@ def run_analysis(config):
         except Exception as e:
             st.warning(f"⚠️ Weather data fetch issue: {str(e)[:100]}")
             weather_data = None
+        
+        # Fetch air quality data (NEW!)
+        aqi_data = None
+        try:
+            aqi_data = aqi_fetcher.fetch_air_quality(
+                lat=center[0],
+                lon=center[1]
+            )
+            if aqi_data:
+                st.success(f"✅ Fetched air quality data: {aqi_data.get('aqi_level', 'Unknown')}")
+                logger.info(f"AQI data fetched successfully: {aqi_data}")
+            else:
+                st.warning("⚠️ Air quality data not available")
+                logger.warning("AQI data is None")
+        except Exception as e:
+            st.error(f"⚠️ Air quality fetch issue: {str(e)}")
+            logger.error(f"AQI fetch error: {e}", exc_info=True)
+            aqi_data = None
         
         # Step 2: Calculate indices from real data or use reasonable estimates
         status_text.text("Step 2/5: Processing satellite imagery...")
@@ -1170,7 +1540,13 @@ def run_analysis(config):
         progress_bar.progress(60)
         
         # Extract weather statistics from real data or estimate
-        if weather_data and len(weather_data) > 0:
+        if weather_data and isinstance(weather_data, dict):
+            # weather_data is a single dict, not a list
+            temp_mean = weather_data.get('temperature', 25.0)
+            humidity_mean = weather_data.get('humidity', 65.0)
+            rainfall_sum = weather_data.get('rainfall', 0.0)
+        elif weather_data and isinstance(weather_data, list) and len(weather_data) > 0:
+            # If it's a list of weather data points
             temps = [w['temperature'] for w in weather_data if 'temperature' in w]
             humidity = [w['humidity'] for w in weather_data if 'humidity' in w]
             rainfall = [w.get('rainfall', 0) for w in weather_data]
@@ -1195,6 +1571,46 @@ def run_analysis(config):
                 temp_mean = base_temp + np.random.uniform(-3, 3)  # Moderate temp
                 humidity_mean = 65 + np.random.uniform(-10, 10)  # Moderate humidity
                 rainfall_sum = np.random.uniform(10, 50)  # Moderate rain
+        
+        # Step 3.5: ICAR Enhancement (India-specific data)
+        icar_data = None
+        location_info = None
+        
+        try:
+            from tier2_acquisition.icar_controller import ICARController, ICARDataEnhancer
+            
+            icar_controller = ICARController()
+            location_info = icar_controller.get_location_details(lat, lon)
+            
+            if location_info.get('is_india', False):
+                st.info("🇮🇳 **ICAR Enhancement Active** - Fetching India-specific agricultural data...")
+                
+                state = location_info.get('state', '')
+                district = location_info.get('district', '')
+                crop_type = config.get('crop_type', 'wheat')
+                
+                # Determine season based on month
+                month = config['start_date'].month
+                if month in [6, 7, 8, 9]:
+                    season = 'Kharif'
+                elif month in [10, 11, 12, 1, 2]:
+                    season = 'Rabi'
+                else:
+                    season = 'Zaid'
+                
+                # Fetch ICAR data
+                icar_data = {
+                    'location': location_info,
+                    'pest_alerts': icar_controller.fetch_pest_alerts(state, district, crop_type),
+                    'recommendations': icar_controller.fetch_crop_recommendations(state, crop_type, season),
+                    'soil_health': icar_controller.fetch_soil_health_data(state, district),
+                    'weather_advisory': icar_controller.get_weather_advisory(state, district)
+                }
+                
+                logger.info(f"ICAR data fetched successfully for {state}, {district}")
+        except Exception as e:
+            logger.warning(f"ICAR enhancement unavailable: {e}")
+            icar_data = None
         
         # Step 4: AI Modeling
         status_text.text("Step 4/5: Running AI models...")
@@ -1237,12 +1653,32 @@ def run_analysis(config):
         else:
             # Normal agricultural area
             crop_health_base = ndvi_mean * 0.7 + (1 - abs(temp_mean - 25) / 20) * 0.3
-            crop_health_score = np.clip(crop_health_base + np.random.uniform(-0.1, 0.1), 0.1, 1.0)
+            
+            # Apply AQI penalty if air quality is poor
+            aqi_penalty = 0.0
+            if aqi_data:
+                aqi_index = aqi_data.get('aqi', 1)
+                if aqi_index >= 4:  # Poor or Very Poor
+                    aqi_penalty = 0.1  # 10% reduction in health score
+                elif aqi_index == 3:  # Moderate
+                    aqi_penalty = 0.05  # 5% reduction
+            
+            crop_health_score = np.clip(crop_health_base - aqi_penalty + np.random.uniform(-0.1, 0.1), 0.1, 1.0)
             
             # Pest risk based on temperature and humidity
             pest_risk_temp = 1.0 if 20 < temp_mean < 32 else 0.3
             pest_risk_humidity = 1.0 if humidity_mean > 70 else 0.5
             pest_risk = np.clip((pest_risk_temp * pest_risk_humidity * 0.4) + np.random.uniform(0, 0.3), 0.0, 1.0)
+            
+            # Enhance pest risk with ICAR data if available
+            if icar_data and 'pest_alerts' in icar_data:
+                try:
+                    enhanced_pest = ICARDataEnhancer.enhance_pest_risk(pest_risk, icar_data['pest_alerts'])
+                    pest_risk = enhanced_pest['risk_score']
+                    pest_confidence = enhanced_pest['confidence']
+                    logger.info(f"Pest risk enhanced with ICAR data: {pest_risk:.2f} (confidence: {pest_confidence:.2f})")
+                except Exception as e:
+                    logger.warning(f"Could not enhance pest risk: {e}")
             
             # Predict locust swarm risk
             locust_risk = locust_predictor.predict_swarm_risk(
@@ -1281,7 +1717,19 @@ def run_analysis(config):
             veg_health = np.clip(ndvi_mean / 0.8, 0, 1)  # Normalize NDVI
             temp_stress = 1.0 - np.clip(abs(temp_mean - 25) / 15, 0, 1)  # Optimal at 25°C
             water_avail = np.clip(humidity_mean / 100, 0, 1)  # Based on humidity
-            soil_quality = 0.7  # Default assumption
+            
+            # Calculate soil quality with AQI impact
+            # Poor air quality affects soil through acid deposition and particulate matter
+            soil_quality_base = 0.7  # Default assumption
+            aqi_soil_penalty = 0.0
+            if aqi_data:
+                aqi_index = aqi_data.get('aqi', 1)
+                if aqi_index >= 4:  # Poor or Very Poor
+                    aqi_soil_penalty = 0.15  # 15% reduction in soil quality due to pollutant deposition
+                elif aqi_index == 3:  # Moderate
+                    aqi_soil_penalty = 0.08  # 8% reduction in soil quality
+            
+            soil_quality = np.clip(soil_quality_base - aqi_soil_penalty, 0.1, 1.0)
             growth_stage = 0.8  # Assume good growth stage
             
             # Calculate yield based on crop type and conditions
@@ -1289,20 +1737,18 @@ def run_analysis(config):
             total_yield_kg = area_hectares * predicted_yield_per_ha
             total_yield_tons = total_yield_kg / 1000
             
-            # Crop-specific market prices (INR per kg)
-            crop_prices = {
-                'wheat': 25,
-                'rice': 22,
-                'maize': 20,
-                'cotton': 60,
-                'sugarcane': 3.5,
-                'soybean': 45,
-                'potato': 15,
-                'tomato': 18,
-                'onion': 12,
-                'default': 20
-            }
-            price_per_kg = crop_prices.get(config.get('crop_type', 'wheat').lower(), crop_prices['default'])
+            # Fetch dynamic market price based on crop, state, and district
+            crop_type_for_price = config.get('crop_type', 'wheat')
+            price_data = get_market_price(
+                crop_type=crop_type_for_price,
+                state=icar_data.get('location', {}).get('state'),
+                district=icar_data.get('location', {}).get('district')
+            )
+            
+            price_per_kg = price_data.get('price_per_kg', 20)
+            price_source = price_data.get('source', 'Market Average')
+            price_range = price_data.get('price_range', 'N/A')
+            
             estimated_gross_value = total_yield_kg * price_per_kg
             
             yield_prediction = {
@@ -1332,11 +1778,35 @@ def run_analysis(config):
                 'economic_estimate': {
                     'estimated_gross_value': estimated_gross_value,
                     'price_per_kg': price_per_kg,
+                    'price_range': price_range,
+                    'price_source': price_source,
                     'total_yield_kg': total_yield_kg,
                     'crop_type': config.get('crop_type', 'wheat'),
-                    'note': f'Based on current market price for {config.get("crop_type", "wheat")}'
+                    'market': price_data.get('market', 'Regional Market'),
+                    'last_updated': price_data.get('last_updated', datetime.now().strftime('%Y-%m-%d')),
+                    'seasonal_factor': price_data.get('seasonal_factor', 'N/A'),
+                    'regional_factor': price_data.get('regional_factor', 'N/A')
                 }
             }
+            
+            # Enhance yield prediction with ICAR benchmark if available
+            if icar_data and 'recommendations' in icar_data:
+                try:
+                    enhanced_yield = ICARDataEnhancer.enhance_yield_prediction(
+                        predicted_yield_per_ha / 1000,  # Convert to tons/ha
+                        icar_data['recommendations']
+                    )
+                    if enhanced_yield.get('enhanced'):
+                        yield_prediction['icar_benchmark'] = {
+                            'state_average_tons_per_ha': enhanced_yield['state_average'],
+                            'comparison': enhanced_yield['comparison'],
+                            'percentile': enhanced_yield['percentile'],
+                            'source': enhanced_yield['source']
+                        }
+                        logger.info(f"Yield enhanced with ICAR benchmark: {enhanced_yield['comparison']} state average")
+                except Exception as e:
+                    logger.warning(f"Could not enhance yield prediction: {e}")
+            
             # yield_prediction = yield_predictor.predict_yield(
             #     crop_type=config['crop_type'],
             #     ndvi_mean=ndvi_mean,
@@ -1520,6 +1990,10 @@ def run_analysis(config):
             'disease_analysis': disease_analysis if is_vegetated_area else None,
             'yield_prediction': yield_prediction if is_vegetated_area else None,
             'nutrient_analysis': nutrient_analysis if is_vegetated_area else None,
+            'aqi_data': aqi_data if aqi_data else None,  # Air quality data (NEW!)
+            'icar_data': icar_data if icar_data else None,  # ICAR enhancements
+            'location_info': location_info if location_info else None,  # Country/state info
+            'aoi_coords': aoi_coords,  # Store AOI coordinates including polygon shape
             'statistics': {
                 'ndvi_mean': round(ndvi_mean, 3),
                 'ndvi_std': round(ndvi_std, 3),
@@ -1609,6 +2083,19 @@ def run_analysis(config):
 
 def main():
     """Main application"""
+    # Initialize database on first run
+    if 'db_initialized' not in st.session_state:
+        try:
+            db = DatabaseManager()
+            db.connect()
+            db.initialize_schema()
+            db.close()
+            st.session_state.db_initialized = True
+            logger.info("Database initialized successfully")
+        except Exception as e:
+            logger.error(f"Database initialization failed: {e}")
+            st.error(f"⚠️ Database initialization issue: {str(e)}")
+    
     initialize_session_state()
     render_header()
     
@@ -1668,15 +2155,30 @@ def main():
                         popup=f"Analysis Area: {config['aoi_coords'].get('radius_km', 5.0)} km radius"
                     ).add_to(preview_map)
                 elif bbox:
-                    # Rectangle or polygon area
-                    folium.Rectangle(
-                        bounds=[[bbox[1], bbox[0]], [bbox[3], bbox[2]]],
-                        color='green',
-                        fill=True,
-                        fillOpacity=0.2,
-                        weight=3,
-                        popup="Selected Area"
-                    ).add_to(preview_map)
+                    # Check if we have a polygon
+                    if config['aoi_coords'].get('type') == 'polygon' and config['aoi_coords'].get('coordinates'):
+                        # Draw the actual polygon shape
+                        polygon_coords = config['aoi_coords']['coordinates']
+                        folium_coords = [[lat, lon] for lon, lat in polygon_coords]
+                        folium.Polygon(
+                            locations=folium_coords,
+                            color='green',
+                            fill=True,
+                            fillColor='green',
+                            fillOpacity=0.3,
+                            weight=3,
+                            popup=f"Polygon Area ({config['aoi_coords'].get('vertices', 0)} vertices)"
+                        ).add_to(preview_map)
+                    else:
+                        # Rectangle or other shape
+                        folium.Rectangle(
+                            bounds=[[bbox[1], bbox[0]], [bbox[3], bbox[2]]],
+                            color='green',
+                            fill=True,
+                            fillOpacity=0.2,
+                            weight=3,
+                            popup="Selected Area"
+                        ).add_to(preview_map)
                 
                 st_folium(preview_map, width=700, height=300, returned_objects=[])
                 
@@ -1730,11 +2232,23 @@ def main():
                             
                             st.session_state.drawn_polygon = {
                                 'center': [sum(lats)/len(lats), sum(lons)/len(lons)],
-                                'bbox': [min(lons), min(lats), max(lons), max(lats)],
+                                'bbox': [min(lons), min(lats), max(lons), max(lats)],  # Bounding box for API calls
                                 'type': 'polygon',
-                                'coordinates': coords
+                                'coordinates': coords,  # Actual polygon shape preserved
+                                'vertices': len(coords)
                             }
-                            st.success(f"✅ Area selected: {abs(max(lats)-min(lats))*111:.2f} km × {abs(max(lons)-min(lons))*111:.2f} km")
+                            
+                            # Calculate approximate area using polygon vertices
+                            from math import radians, cos, sin, sqrt
+                            area_km2 = 0
+                            for i in range(len(coords) - 1):
+                                lat1, lon1 = radians(coords[i][1]), radians(coords[i][0])
+                                lat2, lon2 = radians(coords[i+1][1]), radians(coords[i+1][0])
+                                area_km2 += (lon2 - lon1) * (2 + sin(lat1) + sin(lat2))
+                            area_km2 = abs(area_km2 * 6378.137 * 6378.137 / 2)
+                            
+                            st.success(f"✅ Polygon selected: {len(coords)} vertices, ~{area_km2:.2f} km²")
+                            st.info(f"📐 Note: Analysis uses bounding box ({abs(max(lats)-min(lats))*111:.1f} km × {abs(max(lons)-min(lons))*111:.1f} km) but polygon shape is preserved for area calculations")
                         
                         elif geometry['type'] == 'Rectangle':
                             coords = geometry['coordinates'][0]
@@ -1800,6 +2314,10 @@ def main():
             st.error("❌ Please define an area of interest before analyzing")
         else:
             with st.spinner("Running analysis..."):
+                # Clear old results to ensure fresh data with new features
+                st.session_state.results = None
+                st.session_state.analysis_complete = False
+                
                 results = run_analysis(config)
                 
                 if results:
@@ -1897,6 +2415,20 @@ def main():
             st.markdown("---")
             st.header("🧪 Nutrient Analysis")
             render_nutrient_analysis(st.session_state.results['nutrient_analysis'])
+        
+        # Air Quality Analysis
+        if st.session_state.results.get('aqi_data'):
+            st.markdown("---")
+            render_air_quality(st.session_state.results['aqi_data'])
+        else:
+            logger.warning("AQI data not in results or is None")
+        
+        # ICAR Enhancements (India only)
+        if st.session_state.results.get('icar_data'):
+            render_icar_enhancements(
+                st.session_state.results.get('icar_data'),
+                st.session_state.results.get('location_info')
+            )
         
         # Download report
         if config['generate_report']:

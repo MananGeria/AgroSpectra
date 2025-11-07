@@ -16,6 +16,7 @@ shapely==2.0.2
 fiona==1.9.5
 pyproj==3.6.1
 rtree==1.1.0
+geopy==2.4.0  # For reverse geocoding (country detection)
 
 # Satellite Data API
 sentinelhub==3.9.1

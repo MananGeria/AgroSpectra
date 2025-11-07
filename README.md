@@ -4,12 +4,14 @@
 
 AgroSpectra is a comprehensive 9-tier WebGIS platform for precision agriculture, integrating satellite imagery, weather data, soil databases, and AI models to provide real-time crop health monitoring and pest risk prediction.
 
+**🌍 Global Coverage** with **🇮🇳 India-Enhanced Mode**: Works worldwide with Sentinel Hub + OpenWeatherMap. Automatically provides additional ICAR (Indian Council of Agricultural Research) insights when analyzing locations in India.
+
 ## System Architecture
 
 ### Nine-Tier Architecture:
 
 1. **User Interface Layer** - Streamlit-based dashboard with GPS integration
-2. **Data Acquisition Layer** - Sentinel Hub, OpenWeatherMap, MOSDAC APIs
+2. **Data Acquisition Layer** - Sentinel Hub, OpenWeatherMap, MOSDAC, **ICAR** APIs
 3. **Geospatial Harmonization Layer** - CRS normalization, cloud masking, vegetation indices
 4. **Feature Engineering Layer** - Temporal interpolation, anomaly detection, feature fusion
 5. **AI Modeling Layer** - MobileNetV2 classifier + LSTM predictor + Fusion engine
@@ -20,12 +22,26 @@ AgroSpectra is a comprehensive 9-tier WebGIS platform for precision agriculture,
 
 ## Features
 
+### Core Monitoring (Global)
+
 - Real-time crop health classification (Healthy/Stressed/Diseased)
 - Pest outbreak risk prediction (7-day forecast)
 - NDVI, NDWI, EVI vegetation indices
 - Interactive web maps with time series analysis
 - Automated alerts and PDF reports
 - Model retraining from user feedback
+- **🔍 Location Search by Name** (NEW!): Search any place worldwide - no coordinates needed!
+- **📍 3 AOI Input Methods**: Location search, manual coordinates, or draw on map
+
+### India-Enhanced Mode (Automatic) 🇮🇳
+
+- **Regional Pest Alerts**: ICAR-validated pest warnings by state/district
+- **Crop Recommendations**: State-specific varieties and practices
+- **Soil Health Data**: District-level soil parameters from Soil Health Cards
+- **Weather Advisories**: IMD-ICAR agromet advisories
+- **Yield Benchmarks**: Compare your yield with state averages
+
+See [ICAR Setup Guide](docs/ICAR_SETUP_GUIDE.md) and [Location Search Guide](docs/LOCATION_SEARCH_GUIDE.md) for details.
 
 ## Technology Stack
 
@@ -38,6 +54,7 @@ AgroSpectra is a comprehensive 9-tier WebGIS platform for precision agriculture,
 - GeoPandas 0.10+ (vector data)
 - TensorFlow 2.8+ / Keras (deep learning)
 - Celery 5.2+ (async tasks)
+- **Geopy 2.4+** (reverse geocoding for country detection)
 
 ### Database
 
