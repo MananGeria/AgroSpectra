@@ -1739,10 +1739,20 @@ def run_analysis(config):
             
             # Fetch dynamic market price based on crop, state, and district
             crop_type_for_price = config.get('crop_type', 'wheat')
+            
+            # Safely extract location data from icar_data
+            state = None
+            district = None
+            if icar_data and isinstance(icar_data, dict):
+                location = icar_data.get('location', {})
+                if location:
+                    state = location.get('state')
+                    district = location.get('district')
+            
             price_data = get_market_price(
                 crop_type=crop_type_for_price,
-                state=icar_data.get('location', {}).get('state'),
-                district=icar_data.get('location', {}).get('district')
+                state=state,
+                district=district
             )
             
             price_per_kg = price_data.get('price_per_kg', 20)
