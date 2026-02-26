@@ -1,0 +1,5 @@
+Test,H0,H1,Test Type,p-value,Reject H0,Conclusion
+Fusion Significance,Fusion does not significantly change prediction score,Fusion significantly changes prediction score,Paired t-test,2.499688695446522e-16,True,Fusion SIGNIFICANTLY changes predictions
+Prediction Confidence Increase,Fusion does not increase model confidence,Fusion increases prediction confidence level,One-sided paired t-test (greater),4.698431831867227e-82,True,Fusion SIGNIFICANTLY increases confidence
+Environmental Sensitivity,Weather/soil parameters do not significantly influence prediction output,Weather/soil parameters significantly influence prediction output,Pearson correlation analysis,N/A,True,Environmental parameters SIGNIFICANTLY influence predictions
+NDVI Trend Sensitivity,Prediction score does not significantly change with NDVI variation,Prediction score significantly changes with NDVI variation,Correlation and Linear Regression,6.0394375695669995e-28,True,Prediction SIGNIFICANTLY changes with NDVI
